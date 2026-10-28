@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG Architecture</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1c2230; --muted:#667085; --line:#e3e6ec; --accent:#2f5bea; --accent-soft:#e8eefe; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12151c; --card:#1b1f29; --text:#e8ebf2; --muted:#9aa3b5; --line:#2b3140; --accent:#7b9bff; --accent-soft:#222c4d; }
+  }
+  * { box-sizing:border-box; }
+  html { scroll-behavior:smooth; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:980px; margin:0 auto; padding:24px 16px 80px; }
+  nav { display:flex; gap:14px; margin-bottom:18px; font-size:14px; }
+  a { color:var(--accent); }
+  h1 { font-size:24px; margin:0 0 4px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:36px 0 12px; }
+  h3 { font-size:16px; margin:22px 0 8px; }
+  .sub { color:var(--muted); margin:0 0 8px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; overflow-x:auto; }
+  .mermaid { text-align:center; }
+  .index { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:8px; }
+  .index a { display:block; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--card); text-decoration:none; color:var(--text); }
+  .index a:hover { border-color:var(--accent); background:var(--accent-soft); }
+  .index small { display:block; color:var(--muted); font-size:12px; }
+  table { border-collapse:collapse; width:100%; font-size:14px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; }
+  code { background:var(--accent-soft); padding:1px 5px; border-radius:4px; font-size:13px; }
+  section:target > h3 { color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <nav><a href="/">&larr; Ask questions</a></nav>
+  <h1>RAG backend — design</h1>
+  <p class="sub">Three use cases on one shared toolkit: local Qdrant, local embeddings and rerank, Groq for answers, Gemini for chart vision.</p>
+
+  <h2 id="architecture">Architecture &amp; flowcharts</h2>
+
+  <h3>System overview</h3>
+  <div class="card"><pre class="mermaid">
+flowchart LR
+  UI["Web UI / curl"] --> API["FastAPI<br/>rag.api"]
+  CLI["CLI<br/>rag.cli"] --> PIPE
+  API --> PIPE["pipelines.py<br/>build / retrieve / answer"]
+  PIPE --> ING["ingest/<br/>layout, structure, elements, visuals"]
+  PIPE --> CH["chunking.py"]
+  PIPE --> Q["query.py<br/>routing + filters"]
+  PIPE --> VDB[("Qdrant local<br/>dense + BM25")]
+  PIPE --> PP["postprocess.py<br/>rerank, parents"]
+  PIPE --> GEN["generate.py<br/>grounded prompt"]
+  VDB --- EMB["fastembed<br/>bge-small, BM25, MiniLM reranker"]
+  PP --- EMB
+  GEN --> GROQ["Groq<br/>gpt-oss-120b"]
+  Q --> GROQ
+  ING --> GEM["Gemini<br/>flash-lite vision"]
+  </pre></div>
+
+  <h3>Ingestion flow (per document)</h3>
+  <div class="card"><pre class="mermaid">
+flowchart TB
+  subgraph GPO["1 · GPO annual report"]
+    direction TB
+    g1["PDF"] --> g2["Two-column reading order,<br/>drop footers"] --> g3["Repair ligatures,<br/>hyphens, dropped 'Th'"] --> g4["Sentence chunks<br/>~450 tokens, overlap 60"] --> g5["Embed + index"]
+  end
+  subgraph GEP["2 · World Bank GEP"]
+    direction TB
+    e1["PDF"] --> e2["Outline from fonts:<br/>chapter, region, box"] --> e3["Text repair"] --> e4["Parents ~900 tokens<br/>Children ~280 tokens"] --> e5["Embed heading path + text<br/>filter noise at query time"]
+  end
+  subgraph IMAC["3 · Apple iMac"]
+    direction TB
+    i1["PDF"] --> i2["Rebuild tables<br/>from header bars"]
+    i1 --> i3["Prose with [^n] markers"]
+    i1 --> i4["Endnotes"]
+    i1 --> i5["Gemini describes<br/>visual pages"]
+    i2 --> i6["One chunk per element,<br/>notes attached"]
+    i3 --> i6
+    i4 --> i6
+    i5 --> i6 --> i7["Embed + index"]
+  end
+  </pre></div>
+
+  <h3>Query flow (advanced mode)</h3>
+  <div class="card"><pre class="mermaid">
+flowchart TB
+  A["Question"] --> B{"Use case"}
+  B -- "GEP" --> C["Query understanding (LLM, rules fallback)<br/>region, chapter, executive summary, box"]
+  C --> D["Hybrid search with metadata filter<br/>dense + BM25, RRF, top 20"]
+  B -- "GPO" --> D2["Hybrid search<br/>top 20"]
+  B -- "iMac" --> D3["Hybrid search over table, text,<br/>footnote and vision chunks, top 6"]
+  D --> R["Cross-encoder rerank"]
+  D2 --> R
+  R --> P{"GEP?"}
+  P -- "yes" --> PA["Swap children for parent sections"]
+  P -- "no" --> CTX
+  PA --> CTX["Numbered context with pages"]
+  D3 --> CTX
+  CTX --> L["Groq answer, cites [n]"]
+  L --> O["Answer + sources + trace"]
+  </pre></div>
+
+  <h2 id="er">Schema (ER diagram)</h2>
+  <p class="sub">Qdrant holds chunks as points with a payload; parents and vision descriptions live as JSON files in <code>data/cache</code>.</p>
+  <div class="card"><pre class="mermaid">
+erDiagram
+  DOCUMENT ||--o{ COLLECTION : "indexed as"
+  COLLECTION ||--o{ CHUNK : "stores"
+  PARENT_SECTION ||--o{ CHUNK : "contains"
+  DOCUMENT ||--o{ VISION_PAGE : "has"
+  VISION_PAGE ||--o| CHUNK : "becomes"
+  ENDNOTE ||--o{ CHUNK : "attached to"
+  DOCUMENT {
+    string use_case PK "gpo, gep, imac"
+    string pdf_path
+  }
+  COLLECTION {
+    string name PK "use_case + _naive or _advanced"
+    string mode "naive or advanced"
+    int dense_dim "384 cosine"
+    string sparse "bm25 with IDF"
+  }
+  CHUNK {
+    int id PK
+    string text
+    int page_start
+    int page_end
+    string kind "body, box, summary, table, prose, footnote, vision"
+    string heading_path
+    int parent_id FK "GEP only"
+    string chapter "GEP only"
+    int chapter_no "GEP only"
+    string region "GEP only"
+    bool box "GEP only"
+  }
+  PARENT_SECTION {
+    int parent_id PK
+    string text
+    int page_start
+    int page_end
+  }
+  VISION_PAGE {
+    int page PK
+    string description "Gemini output, cached"
+  }
+  ENDNOTE {
+    int number PK
+    string text
+  }
+  </pre></div>
+
+  <h2 id="feature-index">Feature index (click a feature to jump)</h2>
+  <div class="index">
+    <a href="#f-hybrid">Hybrid search<small>dense + BM25 with RRF</small></a>
+    <a href="#f-rerank">Cross-encoder rerank<small>re-scores a shortlist</small></a>
+    <a href="#f-sentence">Sentence-aware chunking<small>no mid-sentence cuts</small></a>
+    <a href="#f-hierarchy">Parent / child chunks<small>search small, read big</small></a>
+    <a href="#f-heading">Heading-path embedding<small>location travels with text</small></a>
+    <a href="#f-route">Query routing &amp; filters<small>region, chapter, summary, box</small></a>
+    <a href="#f-repair">PDF text repair<small>ligatures, hyphens, columns</small></a>
+    <a href="#f-tables">Table rebuild<small>rows become label: value</small></a>
+    <a href="#f-notes">Footnote linking<small>[^n] pulls in the endnote</small></a>
+    <a href="#f-vision">Chart vision<small>Gemini describes pages</small></a>
+    <a href="#f-grounded">Grounded answers<small>cited, or a refusal</small></a>
+    <a href="#f-modes">Naive vs advanced<small>compare both pipelines</small></a>
+  </div>
+
+  <section id="f-hybrid"><h3>Hybrid search</h3><p>Each chunk has a dense vector (meaning) and a BM25 sparse vector (exact words such as "FDsys" or "58 percent"). Both rankings are merged with Reciprocal Rank Fusion, which uses ranks only, so no score scaling is needed.</p></section>
+  <section id="f-rerank"><h3>Cross-encoder rerank</h3><p>Top 20 hybrid hits are re-scored by reading question and passage together (MiniLM), keeping the best 5 to 8.</p></section>
+  <section id="f-sentence"><h3>Sentence-aware chunking</h3><p>Chunks end on sentence boundaries with a small overlap. On the GPO report this cut 167 naive chunks to 83, with 85% ending at a sentence end.</p></section>
+  <section id="f-hierarchy"><h3>Parent / child chunks</h3><p>~280-token children are searched; the ~900-token parent section is what the LLM reads, so answers keep their surrounding context.</p></section>
+  <section id="f-heading"><h3>Heading-path embedding</h3><p>The chapter and section path is prepended to the text that is embedded; the stored text is unchanged.</p></section>
+  <section id="f-route"><h3>Query routing &amp; filters</h3><p>One LLM call extracts region (for example Pakistan maps to MNA), chapter (only if the question says "Chapter N"), executive summary and box, and rewrites the search query. Rules take over if the call fails. Header, references and table-of-contents chunks are always excluded.</p></section>
+  <section id="f-repair"><h3>PDF text repair</h3><p>Fixes ligature glyphs, the dropped "Th" ligature (Te to The), line-break hyphens, and two-column reading order.</p></section>
+  <section id="f-tables"><h3>Table rebuild</h3><p>Tables are rebuilt from their dark header bars into "Table: … Column: …" plus "label: value" rows, including the multi-level header of the energy table.</p></section>
+  <section id="f-notes"><h3>Footnote linking</h3><p>Superscripts become markers like <code>[^7]</code>. A chunk containing a marker gets "[Note 7] …" appended, and each endnote is also its own chunk.</p></section>
+  <section id="f-vision"><h3>Chart vision</h3><p>Each visual page is sent once to Gemini; the description (for example 445 kg baseline, –99 kg reductions, 346 kg total) is indexed and cached in <code>data/cache</code>.</p></section>
+  <section id="f-grounded"><h3>Grounded answers</h3><p>Passages are numbered with their pages. The model must cite like [1], or reply exactly "I could not find this in the document."</p></section>
+  <section id="f-modes"><h3>Naive vs advanced</h3>
+    <table><tr><th>Use case</th><th>Naive</th><th>Advanced</th></tr>
+      <tr><td>GPO</td><td>fixed-size chunks, dense top 5</td><td>sentence chunks, hybrid, rerank</td></tr>
+      <tr><td>GEP</td><td>dense top 5</td><td>hierarchy, routing, hybrid, rerank, parents</td></tr>
+      <tr><td>iMac</td><td>dense top 5</td><td>hybrid over tables, text, footnotes and vision</td></tr></table></section>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+  mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "default", securityLevel: "loose",
+                       flowchart: { htmlLabels: true, useMaxWidth: true } });
+</script>
+</body>
+</html>

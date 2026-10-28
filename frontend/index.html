@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG Use Cases</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1c2230; --muted:#667085; --line:#e3e6ec; --accent:#2f5bea; --accent-soft:#e8eefe; --warn:#b54708; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12151c; --card:#1b1f29; --text:#e8ebf2; --muted:#9aa3b5; --line:#2b3140; --accent:#7b9bff; --accent-soft:#222c4d; --warn:#f2a65a; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .tabs button, .modes button { border:1px solid var(--line); background:var(--card); color:var(--text); padding:8px 14px; border-radius:8px; cursor:pointer; font:inherit; }
+  .tabs button.on, .modes button.on { background:var(--accent-soft); border-color:var(--accent); color:var(--accent); font-weight:600; }
+  .doc { color:var(--muted); font-size:13px; margin:10px 0 0; }
+  textarea { width:100%; min-height:76px; resize:vertical; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); font:inherit; }
+  textarea:focus { outline:2px solid var(--accent); outline-offset:0; }
+  .ask { background:var(--accent); color:#fff; border:0; padding:10px 20px; border-radius:8px; font:inherit; font-weight:600; cursor:pointer; }
+  .ask:disabled { opacity:.6; cursor:default; }
+  .chips { display:flex; flex-direction:column; gap:6px; margin-top:12px; }
+  .chip { text-align:left; border:1px dashed var(--line); background:transparent; color:var(--muted); padding:7px 10px; border-radius:8px; cursor:pointer; font:inherit; font-size:13px; }
+  .chip:hover { color:var(--accent); border-color:var(--accent); }
+  .label { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:0 0 6px; }
+  .answer { font-size:17px; white-space:pre-wrap; }
+  .trace { color:var(--muted); font-size:13px; margin:0; padding-left:18px; }
+  .cite { border-top:1px solid var(--line); padding:10px 0; }
+  .cite:first-of-type { border-top:0; }
+  .cite b { color:var(--accent); }
+  .meta { color:var(--muted); font-size:12px; }
+  .snippet { font-size:13.5px; margin:4px 0 0; white-space:pre-wrap; }
+  .err { color:var(--warn); }
+  .hl { outline:2px solid var(--accent); border-radius:6px; }
+</style>
+</head>
+<body>
+<main>
+  <p style="margin:0 0 8px;font-size:14px"><a href="/architecture" style="color:var(--accent)">Architecture, flowcharts &amp; schema &rarr;</a></p>
+  <h1>RAG Use Cases</h1>
+  <p class="sub">Ask questions about three documents. Compare a basic pipeline with the advanced one.</p>
+
+  <div class="card">
+    <div class="row tabs" id="tabs"></div>
+    <p class="doc" id="doc"></p>
+    <div class="row modes" style="margin:14px 0 10px" id="modes">
+      <button data-m="advanced" class="on" title="Hybrid search, reranking and document-aware steps">Advanced</button>
+      <button data-m="naive" title="Plain vector search, top 5">Naive</button>
+    </div>
+    <textarea id="q" placeholder="Type a question…"></textarea>
+    <div class="row" style="margin-top:10px"><button class="ask" id="go">Ask</button><span class="meta" id="status"></span></div>
+    <div class="chips" id="chips"></div>
+  </div>
+
+  <div class="card" id="out" hidden>
+    <p class="label">Answer</p>
+    <div class="answer" id="answer"></div>
+    <p class="label" style="margin-top:18px">How it was retrieved</p>
+    <ul class="trace" id="trace"></ul>
+    <p class="label" style="margin-top:18px">Sources</p>
+    <div id="cites"></div>
+  </div>
+</main>
+
+<script>
+const CASES = {
+  gpo:  { name: "1 · GPO Annual Report", doc: "Baseline RAG — GPO annual report", q: [
+    "How many depository libraries did GPO staff visit in FY 2018?",
+    "What new digital system replaced FDsys, and when was it fully deployed?",
+    "How much did GPO procure in printing and information products in FY 2018 on behalf of federal agencies?"] },
+  gep:  { name: "2 · World Bank GEP", doc: "Advanced RAG — long, structured report (chapters, regions, boxes)", q: [
+    "What is the growth outlook for South Asia in this report?",
+    "What does Chapter 3 say about sovereign debt in developing economies?",
+    "According to the executive summary, what are the main risks to the global outlook?"] },
+  imac: { name: "3 · Apple iMac", doc: "Multimodal RAG — tables, charts and footnotes", q: [
+    "How much less energy does iMac use compared to the ENERGY STAR requirement?",
+    "What is the total carbon footprint of the iMac, and how much comes from product use versus manufacturing?",
+    "What material is the iMac stand made from, and what percentage is recycled?"] },
+};
+let useCase = "gpo", mode = "advanced";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function renderCase() {
+  $("tabs").innerHTML = Object.entries(CASES).map(([k, c]) =>
+    `<button data-k="${k}" class="${k === useCase ? "on" : ""}">${esc(c.name)}</button>`).join("");
+  $("doc").textContent = CASES[useCase].doc;
+  $("chips").innerHTML = CASES[useCase].q.map(t => `<button class="chip">${esc(t)}</button>`).join("");
+}
+$("tabs").onclick = e => { const k = e.target.dataset.k; if (k) { useCase = k; renderCase(); $("out").hidden = true; } };
+$("modes").onclick = e => { const m = e.target.dataset.m; if (!m) return; mode = m;
+  document.querySelectorAll("#modes button").forEach(b => b.classList.toggle("on", b.dataset.m === m)); };
+$("chips").onclick = e => { if (e.target.classList.contains("chip")) { $("q").value = e.target.textContent; ask(); } };
+$("go").onclick = ask;
+$("q").onkeydown = e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) ask(); };
+
+async function ask() {
+  const question = $("q").value.trim();
+  if (!question) return;
+  $("go").disabled = true; $("status").textContent = "Searching and generating…";
+  try {
+    const r = await fetch(`/${useCase}/ask`, { method: "POST", headers: { "Content-Type": "application/json" },
+                                                body: JSON.stringify({ question, mode }) });
+    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+    show(await r.json());
+    $("status").textContent = "";
+  } catch (err) {
+    $("out").hidden = false;
+    $("answer").innerHTML = `<span class="err">${esc(err.message)}</span>`;
+    $("trace").innerHTML = ""; $("cites").innerHTML = "";
+    $("status").textContent = "";
+  } finally { $("go").disabled = false; }
+}
+
+function show(d) {
+  $("out").hidden = false;
+  // turn [1], [2] in the answer into links that highlight the matching source
+  $("answer").innerHTML = esc(d.answer).replace(/\[(\d+)\]/g, '<a href="#c$1" data-n="$1">[$1]</a>');
+  $("trace").innerHTML = d.trace.map(t => `<li>${esc(t)}</li>`).join("");
+  $("cites").innerHTML = d.citations.map(c => `
+    <div class="cite" id="c${c.n}"><b>[${c.n}]</b> <span class="meta">pages ${esc(c.pages)} · ${esc(c.kind || "text")}${c.heading ? " · " + esc(c.heading) : ""}</span>
+    <div class="snippet">${esc(c.text)}${c.text.length >= 300 ? "…" : ""}</div></div>`).join("");
+}
+$("answer").onclick = e => { const n = e.target.dataset.n; if (!n) return;
+  const el = $("c" + n); el.classList.add("hl"); setTimeout(() => el.classList.remove("hl"), 1500); };
+
+renderCase();
+</script>
+</body>
+</html>
